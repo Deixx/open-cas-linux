@@ -1,5 +1,6 @@
 #
 # Copyright(c) 2020-2022 Intel Corporation
+# Copyright(c) 2024 Huawei Technologies
 # SPDX-License-Identifier: BSD-3-Clause
 #
 
@@ -10,13 +11,13 @@ from api.cas.cache_config import CacheMode, CleaningPolicy, CacheModeTrait
 from api.cas.casadm_parser import wait_for_flushing
 from core.test_run import TestRun
 from storage_devices.disk import DiskType, DiskTypeSet, DiskTypeLowerThan
-from test_tools.disk_utils import Filesystem
+from test_tools import fs_utils
 from test_tools.dd import Dd
+from test_tools.disk_utils import Filesystem
 from test_utils import os_utils
 from test_utils.os_utils import Udev, DropCachesMode
 from test_utils.size import Size, Unit
 from tests.lazy_writes.recovery.recovery_tests_methods import compare_files
-from test_tools import fs_utils
 
 mount_point = "/mnt/cas"
 test_file_path = f"{mount_point}/test_file"
@@ -196,17 +197,17 @@ def test_interrupt_cache_flush(cache_mode, filesystem):
 @pytest.mark.require_disk("core", DiskTypeLowerThan("cache"))
 def test_interrupt_core_remove(cache_mode, filesystem):
     """
-    title: Test if OpenCAS works correctly after core's removing interruption.
+    title: Core removal interruption.
     description: |
-      Negative test of the ability of OpenCAS to handle core's removing interruption.
+      Test for proper handling of 'core remove' operation interruption.
     pass_criteria:
       - No system crash.
       - Core would not be removed from cache after interruption.
       - Flushing would be stopped after interruption.
-      - Md5sum are correct during all test steps.
+      - Checksums are correct during all test steps.
       - Dirty blocks quantity after interruption is lower but non-zero.
     """
-    with TestRun.step("Prepare cache and core."):
+    with TestRun.step("Prepare cache and core devices"):
         cache_dev = TestRun.disks["cache"]
         cache_dev.create_partitions([cache_size])
         cache_part = cache_dev.partitions[0]
@@ -215,37 +216,36 @@ def test_interrupt_core_remove(cache_mode, filesystem):
         core_part = core_dev.partitions[0]
 
     for _ in TestRun.iteration(
-        range(iterations_per_config), f"Reload cache configuration {iterations_per_config} times."
+        range(iterations_per_config), f"Reload cache configuration {iterations_per_config} times"
     ):
-
-        with TestRun.step("Start cache."):
+        with TestRun.step("Start cache"):
             cache = casadm.start_cache(cache_part, cache_mode, force=True)
 
-        with TestRun.step("Set cleaning policy to NOP."):
+        with TestRun.step("Set cleaning policy to NOP"):
             cache.set_cleaning_policy(CleaningPolicy.nop)
 
-        with TestRun.step(f"Add core device with {filesystem} filesystem and mount it."):
+        with TestRun.step(f"Add core device with {filesystem} filesystem and mount it"):
             core_part.create_filesystem(filesystem)
             core = cache.add_core(core_part)
             core.mount(mount_point)
 
-        with TestRun.step(f"Create test file in mount point of exported object."):
+        with TestRun.step("Create test file in mount point of exported object"):
             test_file = create_test_file()
 
-        with TestRun.step("Check md5 sum of test file."):
-            test_file_md5sum_before = test_file.md5sum()
+        with TestRun.step("Calculate checksum of test file"):
+            test_file_crc32sum_before = test_file.crc32sum()
 
         with TestRun.step(
-            "Get number of dirty data on exported object before core removal interruption."
+            "Get number of dirty data on exported object before core removal interruption"
         ):
             os_utils.sync()
             os_utils.drop_caches(DropCachesMode.ALL)
             cache_dirty_blocks_before = cache.get_dirty_blocks()
 
-        with TestRun.step("Unmount core."):
+        with TestRun.step("Unmount core"):
             core.unmount()
 
-        with TestRun.step("Start removing core device."):
+        with TestRun.step("Start removing core"):
             flush_pid = TestRun.executor.run_in_background(
                 cli.remove_core_cmd(str(cache.cache_id), str(core.core_id))
             )
@@ -257,42 +257,39 @@ def test_interrupt_core_remove(cache_mode, filesystem):
                 percentage = casadm_parser.get_flushing_progress(cache.cache_id, core.core_id)
             TestRun.executor.run(f"kill -s SIGINT {flush_pid}")
 
-        with TestRun.step("Check md5 sum of test file after interruption."):
-            cache.set_cache_mode(CacheMode.WO)
-            test_file_md5sum_interrupt = test_file.md5sum()
-            cache.set_cache_mode(cache_mode)
-
         with TestRun.step(
-            "Check number of dirty data on exported object after core removal interruption."
+            "Check number of dirty data on exported object after core removal interruption"
         ):
             cache_dirty_blocks_after = cache.get_dirty_blocks()
             if cache_dirty_blocks_after >= cache_dirty_blocks_before:
                 TestRun.LOGGER.error(
-                    "Quantity of dirty lines after core removal interruption " "should be lower."
+                    "Quantity of dirty lines after core removal interruption should be lower."
                 )
             if int(cache_dirty_blocks_after) == 0:
                 TestRun.LOGGER.error(
-                    "Quantity of dirty lines after core removal interruption " "should not be zero."
+                    "Quantity of dirty lines after core removal interruption should not be zero."
                 )
 
-        with TestRun.step("Remove core from cache."):
-            core.remove_core()
+        with TestRun.step("Mount core and verify test file checksum after interruption"):
+            core.mount(mount_point)
 
-        with TestRun.step("Stop cache."):
+            if test_file.crc32sum() != test_file_crc32sum_before:
+                TestRun.LOGGER.error("Checksum after interrupting core removal is different.")
+
+        with TestRun.step("Unmount core"):
+            core.unmount()
+
+        with TestRun.step("Stop cache"):
             cache.stop()
 
-        with TestRun.step("Mount core device."):
+        with TestRun.step("Mount core device"):
             core_part.mount(mount_point)
 
-        with TestRun.step("Check md5 sum of test file again."):
-            if test_file_md5sum_before != test_file.md5sum():
-                TestRun.LOGGER.error("Md5 sum before interrupting core removal is different.")
+        with TestRun.step("Verify checksum of test file again"):
+            if test_file.crc32sum() != test_file_crc32sum_before:
+                TestRun.LOGGER.error("Checksum after core removal is different.")
 
-            is_sum_diff_after_interrupt = test_file_md5sum_interrupt != test_file.md5sum()
-            if is_sum_diff_after_interrupt:
-                TestRun.LOGGER.error("Md5 sum after interrupting core removal is different.")
-
-        with TestRun.step("Unmount core device."):
+        with TestRun.step("Unmount core device"):
             core_part.unmount()
 
 
@@ -482,7 +479,7 @@ def create_test_file():
     bs = Size(512, Unit.KibiByte)
     cnt = int(cache_size.value / bs.value)
     test_file = File.create_file(test_file_path)
-    dd = Dd().output(test_file_path).input("/dev/zero").block_size(bs).count(cnt)
+    dd = Dd().output(test_file_path).input("/dev/zero").block_size(bs).count(cnt).oflag("direct")
     dd.run()
     test_file.refresh_item()
     return test_file
