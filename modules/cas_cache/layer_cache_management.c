@@ -1326,6 +1326,22 @@ static void _cache_mngt_add_core_complete(ocf_cache_t cache,
 
 static void _cache_mngt_generic_complete(void *priv, int error);
 
+static void _core_set_rotational_property(ocf_core_t core)
+{
+	cas_bdev_handle_t bdev_handle;
+	struct block_device *bdev;
+	struct request_queue *q;
+	char holder[] = "CAS CHECK CORE ROTATIONAL\n";
+	const ocf_uuid_t core_uuid = (const ocf_uuid_t)ocf_core_get_uuid(core);
+	const char *core_path = (const char*)core_uuid->data;
+
+	bdev_handle = cas_bdev_open_by_path(core_path, (FMODE_READ), holder);
+	bdev = cas_bdev_get_from_handle(bdev_handle);
+	q = bdev_get_queue(bdev);
+
+	ocf_core_set_rotational(core, (uint8_t)(!blk_queue_nonrot(q)));
+}
+
 int cache_mngt_add_core_to_cache(const char *cache_name, size_t name_len,
 		struct ocf_mngt_core_config *cfg,
 		struct kcas_insert_core *cmd_info)
@@ -1408,6 +1424,7 @@ int cache_mngt_add_core_to_cache(const char *cache_name, size_t name_len,
 	ocf_mngt_cache_put(cache);
 
 	_cache_mngt_log_core_device_path(core);
+	_core_set_rotational_property(core);
 
 	return 0;
 
